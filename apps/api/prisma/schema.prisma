@@ -1,0 +1,39 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["multiSchema"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  schemas  = ["auth", "sheets"]
+}
+
+model User {
+  id           String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  email        String   @unique
+  passwordHash String   @map("password_hash")
+  displayName  String   @map("display_name")
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz
+  sheets       Sheet[]
+
+  @@map("users")
+  @@schema("auth")
+}
+
+model Sheet {
+  id              String    @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  ownerId         String    @map("owner_id") @db.Uuid
+  title           String
+  instrument      String
+  visibility      String    @default("private")
+  status          String    @default("pending")
+  transcriptionId String?   @map("transcription_id") @db.Uuid
+  audioPath       String    @map("audio_path")
+  createdAt       DateTime  @default(now()) @map("created_at") @db.Timestamptz
+  deletedAt       DateTime? @map("deleted_at") @db.Timestamptz
+  owner           User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+
+  @@map("sheets")
+  @@schema("sheets")
+}
