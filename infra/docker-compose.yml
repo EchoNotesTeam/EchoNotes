@@ -1,0 +1,110 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: echonotes
+      POSTGRES_USER: echonotes
+      POSTGRES_PASSWORD: echonotes
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U echonotes -d echonotes"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  ml:
+    build:
+      context: ../ml/transcriber
+      dockerfile: Dockerfile
+    ports:
+      - "8001:8000"  # exposed on 8001 for debugging; internal traffic uses port 8000
+    environment:
+      ARTIFACT_ROOT: /var/echonotes
+    volumes:
+      - echonotes_data:/var/echonotes
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  ai:
+    build:
+      context: ../services/ai-orchestrator
+      dockerfile: Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ml:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://echonotes:echonotes@postgres:5432/echonotes
+      REDIS_URL: redis://redis:6379
+      ML_BASE_URL: http://ml:8000
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+      ARTIFACT_ROOT: /var/echonotes
+      PORT: 8080
+    ports:
+      - "8080:8080"
+    volumes:
+      - echonotes_data:/var/echonotes
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: ..
+      dockerfile: apps/api/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ai:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://echonotes:echonotes@postgres:5432/echonotes
+      AI_BASE_URL: http://ai:8080
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+      JWT_SECRET: ${JWT_SECRET}
+      ARTIFACT_ROOT: /var/echonotes
+      PORT: 3000
+      HOST: 0.0.0.0
+      NODE_ENV: production
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:5173}
+    ports:
+      - "3000:3000"
+    volumes:
+      - echonotes_data:/var/echonotes
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pg_data:
+  redis_data:
+  echonotes_data:

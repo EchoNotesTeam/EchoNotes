@@ -11,14 +11,29 @@ import { orchestrator } from "../services/orchestrator.js";
 
 const ARTIFACT_ROOT = process.env.ARTIFACT_ROOT || "C:/var/echonotes";
 
+// Allowed audio MIME types and extensions for upload validation.
+const ALLOWED_EXTENSIONS = new Set([".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"]);
+const ALLOWED_MIMES = new Set([
+  "audio/mpeg",
+  "audio/wav",
+  "audio/x-wav",
+  "audio/flac",
+  "audio/ogg",
+  "audio/mp4",
+  "audio/x-m4a",
+  "audio/aac",
+  "audio/vnd.wave",
+  "application/octet-stream", // generic binary, allowed because some OS send this for audio
+]);
+
 export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
-  const cookie = req.cookies.session;
-  if (!cookie) {
+  const token = req.cookies.session;
+  if (!token) {
     reply.code(401);
     throw new Error("Unauthorized");
   }
   try {
-    const { userId } = await verifyJwt(cookie);
+    const { userId } = await verifyJwt(token);
     req.user = { id: userId };
   } catch {
     reply.code(401);
@@ -26,26 +41,55 @@ export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
   }
 }
 
+function artifactDir(transcriptionId: string) {
+  return path.join(ARTIFACT_ROOT, "artifacts", transcriptionId);
+}
+
+async function readArtifact(transcriptionId: string, filename: string): Promise<string | null> {
+  try {
+    return await fs.promises.readFile(path.join(artifactDir(transcriptionId), filename), "utf-8");
+  } catch {
+    return null;
+  }
+}
+
 export async function sheetsRoutes(fastify: FastifyInstance) {
   const server = fastify.withTypeProvider<ZodTypeProvider>();
 
+  // GET /api/sheets — list the authenticated user's sheets (paginated).
   server.get(
     "/",
-    { preHandler: [requireAuth] },
-    async (req, reply) => {
-      const sheets = await prisma.sheet.findMany({
-        where: {
-          ownerId: req.user!.id,
-          deletedAt: null,
-        },
-        orderBy: {
-          createdAt: "desc",
-        },
-      });
-      return { sheets };
+    {
+      preHandler: [requireAuth],
+      schema: {
+        querystring: z.object({
+          page: z.coerce.number().int().min(1).default(1),
+          limit: z.coerce.number().int().min(1).max(100).default(20),
+          status: z.enum(["pending", "processing", "ready", "failed"]).optional(),
+        }),
+      },
+    },
+    async (req) => {
+      const { page, limit, status } = req.query;
+      const skip = (page - 1) * limit;
+
+      const [sheets, total] = await prisma.$transaction([
+        prisma.sheet.findMany({
+          where: { ownerId: req.user!.id, deletedAt: null, ...(status ? { status } : {}) },
+          orderBy: { createdAt: "desc" },
+          skip,
+          take: limit,
+        }),
+        prisma.sheet.count({
+          where: { ownerId: req.user!.id, deletedAt: null, ...(status ? { status } : {}) },
+        }),
+      ]);
+
+      return { sheets, pagination: { page, limit, total, pages: Math.ceil(total / limit) } };
     }
   );
 
+  // POST /api/sheets/upload — accept a multipart audio file + metadata.
   server.post(
     "/upload",
     { preHandler: [requireAuth] },
@@ -56,17 +100,26 @@ export async function sheetsRoutes(fastify: FastifyInstance) {
         return { error: { code: "NO_FILE", message: "No file uploaded" } };
       }
 
-      const titleField = data.fields.title;
-      const instrumentField = data.fields.instrument;
-      const visibilityField = data.fields.visibility;
+      const field = (name: string) => {
+        const f = data.fields[name];
+        return f && "value" in f ? String(f.value) : undefined;
+      };
 
-      const title = (titleField && "value" in titleField) ? String(titleField.value) : "Untitled";
-      const instrument = (instrumentField && "value" in instrumentField) ? String(instrumentField.value) : "piano";
-      const visibility = (visibilityField && "value" in visibilityField) ? String(visibilityField.value) : "private";
+      const title = field("title") ?? "Untitled";
+      const instrument = field("instrument") ?? "piano";
+      const visibility = field("visibility") ?? "private";
+      const tagsRaw = field("tags");
+      const tags = tagsRaw
+        ? tagsRaw
+            .split(",")
+            .map((t) => t.trim().toLowerCase())
+            .filter(Boolean)
+            .slice(0, 10)
+        : [];
 
       if (instrument !== "guitar" && instrument !== "piano") {
         reply.code(400);
-        return { error: { code: "INVALID_INSTRUMENT", message: "Instrument must be piano or guitar" } };
+        return { error: { code: "INVALID_INSTRUMENT", message: "Instrument must be guitar or piano" } };
       }
 
       if (visibility !== "private" && visibility !== "public") {
@@ -74,13 +127,27 @@ export async function sheetsRoutes(fastify: FastifyInstance) {
         return { error: { code: "INVALID_VISIBILITY", message: "Visibility must be private or public" } };
       }
 
+      // Validate by extension; MIME is also checked but browsers send inconsistent types.
+      const ext = path.extname(data.filename).toLowerCase();
+      if (!ALLOWED_EXTENSIONS.has(ext)) {
+        reply.code(400);
+        return {
+          error: {
+            code: "INVALID_FILE_TYPE",
+            message: `Unsupported file type. Allowed: ${[...ALLOWED_EXTENSIONS].join(", ")}`,
+          },
+        };
+      }
+
+      if (data.mimetype && !ALLOWED_MIMES.has(data.mimetype)) {
+        reply.code(400);
+        return { error: { code: "INVALID_MIME_TYPE", message: "Unsupported audio format" } };
+      }
+
       const uploadsDir = path.join(ARTIFACT_ROOT, "uploads");
       await fs.promises.mkdir(uploadsDir, { recursive: true });
 
-      const filename = data.filename;
-      const ext = path.extname(filename) || ".wav";
-      const uuid = crypto.randomUUID();
-      const audioFilename = `${uuid}${ext}`;
+      const audioFilename = `${crypto.randomUUID()}${ext}`;
       const audioPath = path.join(uploadsDir, audioFilename).replace(/\\/g, "/");
 
       const writeStream = fs.createWriteStream(audioPath);
@@ -94,82 +161,114 @@ export async function sheetsRoutes(fastify: FastifyInstance) {
           visibility,
           status: "pending",
           audioPath,
+          tags,
         },
       });
 
       try {
-        const jobRes = await orchestrator.submitJob(
-          sheet.id,
-          req.user!.id,
-          audioPath,
-          instrument
-        );
-
-        return {
-          sheetId: sheet.id,
-          jobId: jobRes.job_id,
-        };
-      } catch (err: any) {
-        await prisma.sheet.update({
-          where: { id: sheet.id },
-          data: { status: "failed" },
-        });
+        const jobRes = await orchestrator.submitJob(sheet.id, req.user!.id, audioPath, instrument);
+        return { sheetId: sheet.id, jobId: jobRes.job_id };
+      } catch (err: unknown) {
+        await prisma.sheet.update({ where: { id: sheet.id }, data: { status: "failed" } });
         reply.code(500);
-        return { error: { code: "ORCHESTRATOR_ERROR", message: err.message } };
+        return {
+          error: {
+            code: "ORCHESTRATOR_ERROR",
+            message: err instanceof Error ? err.message : "Failed to submit transcription job",
+          },
+        };
       }
     }
   );
 
-  server.get(
-    "/:id",
-    { preHandler: [requireAuth] },
-    async (req, reply) => {
-      const { id } = req.params as { id: string };
+  // GET /api/sheets/public — listing of all public sheets (no auth required).
+  server.get("/public", async (req: FastifyRequest, reply) => {
+    const query = req.query as { page?: string; limit?: string };
+    const page = Math.max(1, Number(query.page) || 1);
+    const limit = Math.min(100, Math.max(1, Number(query.limit) || 20));
+    const skip = (page - 1) * limit;
 
-      const sheet = await prisma.sheet.findFirst({
-        where: { id, deletedAt: null },
-      });
+    const [sheets, total] = await prisma.$transaction([
+      prisma.sheet.findMany({
+        where: { visibility: "public", status: "ready", deletedAt: null },
+        orderBy: { createdAt: "desc" },
+        skip,
+        take: limit,
+        include: { owner: { select: { username: true, displayName: true } } },
+      }),
+      prisma.sheet.count({ where: { visibility: "public", status: "ready", deletedAt: null } }),
+    ]);
 
-      if (!sheet) {
-        reply.code(404);
-        return { error: { code: "NOT_FOUND", message: "Sheet not found" } };
-      }
+    return { sheets, pagination: { page, limit, total, pages: Math.ceil(total / limit) } };
+  });
 
-      if (sheet.ownerId !== req.user!.id && sheet.visibility !== "public") {
-        reply.code(403);
-        return { error: { code: "FORBIDDEN", message: "Access denied" } };
-      }
+  // GET /api/sheets/public/:id — public sheet detail without auth.
+  server.get("/public/:id", async (req: FastifyRequest, reply) => {
+    const { id } = req.params as { id: string };
 
-      let musicXml = null;
-      if (sheet.status === "ready" && sheet.transcriptionId) {
-        const xmlPath = path.join(ARTIFACT_ROOT, "artifacts", sheet.transcriptionId, "score.musicxml");
-        try {
-          musicXml = await fs.promises.readFile(xmlPath, "utf-8");
-        } catch {}
-      }
+    const sheet = await prisma.sheet.findFirst({
+      where: { id, visibility: "public", deletedAt: null },
+      include: { owner: { select: { username: true, displayName: true } } },
+    });
 
-      return { sheet, musicXml };
+    if (!sheet) {
+      reply.code(404);
+      return { error: { code: "NOT_FOUND", message: "Sheet not found" } };
     }
-  );
 
+    let svg: string | null = null;
+    if (sheet.status === "ready" && sheet.transcriptionId) {
+      svg = await readArtifact(sheet.transcriptionId, "score.svg");
+    }
+
+    return { sheet, svg };
+  });
+
+  // GET /api/sheets/:id — sheet detail for the owner or any user if public.
+  server.get("/:id", { preHandler: [requireAuth] }, async (req, reply) => {
+    const { id } = req.params as { id: string };
+
+    const sheet = await prisma.sheet.findFirst({
+      where: { id, deletedAt: null },
+      include: { owner: { select: { username: true, displayName: true } } },
+    });
+
+    if (!sheet) {
+      reply.code(404);
+      return { error: { code: "NOT_FOUND", message: "Sheet not found" } };
+    }
+
+    if (sheet.ownerId !== req.user!.id && sheet.visibility !== "public") {
+      reply.code(403);
+      return { error: { code: "FORBIDDEN", message: "Access denied" } };
+    }
+
+    let svg: string | null = null;
+    if (sheet.status === "ready" && sheet.transcriptionId) {
+      svg = await readArtifact(sheet.transcriptionId, "score.svg");
+    }
+
+    return { sheet, svg };
+  });
+
+  // PATCH /api/sheets/:id — update title, visibility, or tags.
   server.patch(
     "/:id",
     {
       preHandler: [requireAuth],
       schema: {
         body: z.object({
-          title: z.string().min(1).optional(),
+          title: z.string().min(1).max(200).optional(),
           visibility: z.enum(["private", "public"]).optional(),
+          tags: z.array(z.string().min(1).max(30)).max(10).optional(),
         }),
       },
     },
     async (req, reply) => {
       const { id } = req.params as { id: string };
-      const { title, visibility } = req.body;
+      const { title, visibility, tags } = req.body;
 
-      const sheet = await prisma.sheet.findFirst({
-        where: { id, deletedAt: null },
-      });
+      const sheet = await prisma.sheet.findFirst({ where: { id, deletedAt: null } });
 
       if (!sheet) {
         reply.code(404);
@@ -184,8 +283,9 @@ export async function sheetsRoutes(fastify: FastifyInstance) {
       const updated = await prisma.sheet.update({
         where: { id },
         data: {
-          title: title ?? sheet.title,
-          visibility: visibility ?? sheet.visibility,
+          ...(title !== undefined ? { title } : {}),
+          ...(visibility !== undefined ? { visibility } : {}),
+          ...(tags !== undefined ? { tags } : {}),
         },
       });
 
@@ -193,132 +293,82 @@ export async function sheetsRoutes(fastify: FastifyInstance) {
     }
   );
 
-  server.delete(
-    "/:id",
-    { preHandler: [requireAuth] },
-    async (req, reply) => {
-      const { id } = req.params as { id: string };
+  // DELETE /api/sheets/:id — soft delete.
+  server.delete("/:id", { preHandler: [requireAuth] }, async (req, reply) => {
+    const { id } = req.params as { id: string };
 
-      const sheet = await prisma.sheet.findFirst({
-        where: { id, deletedAt: null },
-      });
+    const sheet = await prisma.sheet.findFirst({ where: { id, deletedAt: null } });
 
-      if (!sheet) {
-        reply.code(404);
-        return { error: { code: "NOT_FOUND", message: "Sheet not found" } };
-      }
-
-      if (sheet.ownerId !== req.user!.id) {
-        reply.code(403);
-        return { error: { code: "FORBIDDEN", message: "Access denied" } };
-      }
-
-      await prisma.sheet.update({
-        where: { id },
-        data: { deletedAt: new Date() },
-      });
-
-      return { success: true };
+    if (!sheet) {
+      reply.code(404);
+      return { error: { code: "NOT_FOUND", message: "Sheet not found" } };
     }
-  );
 
-  server.get(
-    "/public/:id",
-    async (req, reply) => {
-      const { id } = req.params as { id: string };
-
-      const sheet = await prisma.sheet.findFirst({
-        where: { id, visibility: "public", deletedAt: null },
-      });
-
-      if (!sheet) {
-        reply.code(404);
-        return { error: { code: "NOT_FOUND", message: "Sheet not found" } };
-      }
-
-      let musicXml = null;
-      if (sheet.status === "ready" && sheet.transcriptionId) {
-        const xmlPath = path.join(ARTIFACT_ROOT, "artifacts", sheet.transcriptionId, "score.musicxml");
-        try {
-          musicXml = await fs.promises.readFile(xmlPath, "utf-8");
-        } catch {}
-      }
-
-      return { sheet, musicXml };
+    if (sheet.ownerId !== req.user!.id) {
+      reply.code(403);
+      return { error: { code: "FORBIDDEN", message: "Access denied" } };
     }
-  );
 
-  server.get(
-    "/:id/download/:format",
-    async (req, reply) => {
-      const { id, format } = req.params as { id: string; format: string };
+    await prisma.sheet.update({ where: { id }, data: { deletedAt: new Date() } });
+    return { success: true };
+  });
 
-      const sheet = await prisma.sheet.findFirst({
-        where: { id, deletedAt: null },
-      });
+  // GET /api/sheets/:id/download/:format — file download (attachment).
+  server.get("/:id/download/:format", async (req: FastifyRequest, reply) => {
+    const { id, format } = req.params as { id: string; format: string };
 
-      if (!sheet) {
-        reply.code(404);
-        return { error: { code: "NOT_FOUND", message: "Sheet not found" } };
+    const sheet = await prisma.sheet.findFirst({ where: { id, deletedAt: null } });
+    if (!sheet) {
+      reply.code(404);
+      return { error: { code: "NOT_FOUND", message: "Sheet not found" } };
+    }
+
+    // Private sheets require auth.
+    if (sheet.visibility !== "public") {
+      const token = req.cookies.session;
+      if (!token) {
+        reply.code(401);
+        return { error: { code: "UNAUTHORIZED", message: "Unauthorized" } };
       }
-
-      if (sheet.visibility !== "public") {
-        const cookie = req.cookies.session;
-        if (!cookie) {
-          reply.code(401);
-          return { error: { code: "UNAUTHORIZED", message: "Unauthorized" } };
+      try {
+        const { userId } = await verifyJwt(token);
+        if (sheet.ownerId !== userId) {
+          reply.code(403);
+          return { error: { code: "FORBIDDEN", message: "Access denied" } };
         }
-        try {
-          const { userId } = await verifyJwt(cookie);
-          if (sheet.ownerId !== userId) {
-            reply.code(403);
-            return { error: { code: "FORBIDDEN", message: "Access denied" } };
-          }
-        } catch {
-          reply.code(401);
-          return { error: { code: "UNAUTHORIZED", message: "Unauthorized" } };
-        }
+      } catch {
+        reply.code(401);
+        return { error: { code: "UNAUTHORIZED", message: "Unauthorized" } };
       }
-
-      if (sheet.status !== "ready" || !sheet.transcriptionId) {
-        reply.code(400);
-        return { error: { code: "NOT_READY", message: "Transcription is not ready" } };
-      }
-
-      let filename = "score";
-      let contentType = "application/octet-stream";
-
-      switch (format) {
-        case "musicxml":
-          filename = "score.musicxml";
-          contentType = "application/vnd.recordare.musicxml+xml";
-          break;
-        case "svg":
-          filename = "score.svg";
-          contentType = "image/svg+xml";
-          break;
-        case "pdf":
-          filename = "score.pdf";
-          contentType = "application/pdf";
-          break;
-        case "midi":
-          filename = "score.mid";
-          contentType = "audio/midi";
-          break;
-        default:
-          reply.code(400);
-          return { error: { code: "INVALID_FORMAT", message: "Invalid download format" } };
-      }
-
-      const filePath = path.join(ARTIFACT_ROOT, "artifacts", sheet.transcriptionId, filename);
-      if (!fs.existsSync(filePath)) {
-        reply.code(404);
-        return { error: { code: "FILE_NOT_FOUND", message: "Requested file not found on server" } };
-      }
-
-      reply.header("Content-Type", contentType);
-      reply.header("Content-Disposition", `attachment; filename="${filename}"`);
-      return fs.createReadStream(filePath);
     }
-  );
+
+    if (sheet.status !== "ready" || !sheet.transcriptionId) {
+      reply.code(400);
+      return { error: { code: "NOT_READY", message: "Transcription is not ready yet" } };
+    }
+
+    type FormatInfo = { filename: string; contentType: string };
+    const formats: Record<string, FormatInfo> = {
+      musicxml: { filename: "score.musicxml", contentType: "application/vnd.recordare.musicxml+xml" },
+      svg:      { filename: "score.svg",      contentType: "image/svg+xml" },
+      pdf:      { filename: "score.pdf",      contentType: "application/pdf" },
+      midi:     { filename: "notes.midi",     contentType: "audio/midi" },
+    };
+
+    const info = formats[format];
+    if (!info) {
+      reply.code(400);
+      return { error: { code: "INVALID_FORMAT", message: "Valid formats: musicxml, svg, pdf, midi" } };
+    }
+
+    const filePath = path.join(artifactDir(sheet.transcriptionId), info.filename);
+    if (!fs.existsSync(filePath)) {
+      reply.code(404);
+      return { error: { code: "FILE_NOT_FOUND", message: "Artifact not found on server" } };
+    }
+
+    reply.header("Content-Type", info.contentType);
+    reply.header("Content-Disposition", `attachment; filename="${info.filename}"`);
+    return fs.createReadStream(filePath);
+  });
 }
