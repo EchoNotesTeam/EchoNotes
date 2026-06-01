@@ -13,16 +13,18 @@ Go orchestrator. Models are loaded once at startup and reused across requests.
 
 import asyncio
 import base64
+import json
 import os
 import tempfile
 import time
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from importlib.metadata import version as pkg_version
 
 import structlog
 import verovio
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 
 from transcriber.models import (
     ErrorDetail,
@@ -110,13 +112,25 @@ async def get_version() -> VersionResponse:
     },
     tags=["transcription"],
 )
-async def transcribe(request: TranscribeRequest) -> TranscribeResponse:
+async def transcribe(request: TranscribeRequest, http_request: Request):
     """Run the full four-stage transcription pipeline on an audio file.
 
     The audio file must already be present on the shared filesystem volume
     (written there by the TypeScript API before calling the Go orchestrator,
     which then calls this endpoint).
+
+    When the caller sends ``Accept: text/event-stream`` (the Go orchestrator
+    always does), the pipeline streams a ``progress`` event per stage and a
+    terminal ``result`` event. Otherwise it runs to completion and returns the
+    payload as a single JSON response.
     """
+    if "text/event-stream" in http_request.headers.get("accept", ""):
+        return StreamingResponse(
+            _transcribe_sse(request),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     loop = asyncio.get_event_loop()
     try:
         result = await loop.run_in_executor(None, _run_pipeline, request)
@@ -138,8 +152,74 @@ async def transcribe(request: TranscribeRequest) -> TranscribeResponse:
     return result
 
 
-def _run_pipeline(request: TranscribeRequest) -> TranscribeResponse:
-    """Synchronous pipeline — runs in a thread pool executor."""
+async def _transcribe_sse(request: TranscribeRequest):
+    """Run the pipeline in a worker thread, streaming per-stage SSE events.
+
+    The blocking pipeline runs in the default executor so it never stalls the
+    event loop. Each stage pushes a ``progress`` event through an asyncio queue;
+    the final payload arrives as a ``result`` event (or ``error`` on failure).
+    This is the exact contract the Go orchestrator consumes.
+    """
+    loop = asyncio.get_event_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def progress(stage: str, pct: int, message: str) -> None:
+        loop.call_soon_threadsafe(
+            queue.put_nowait,
+            {"type": "progress", "stage": stage, "pct": pct, "message": message},
+        )
+
+    def worker() -> None:
+        try:
+            result = _run_pipeline(request, progress)
+            payload = {"type": "result", "data": result.model_dump()}
+        except HTTPException as exc:
+            detail = exc.detail
+            if not isinstance(detail, dict):
+                detail = {"error_code": "PROCESSING_ERROR", "message": str(detail)}
+            payload = {"type": "error", "detail": detail}
+        except ValueError as exc:
+            payload = {"type": "error", "detail": {"error_code": "PROCESSING_ERROR", "message": str(exc)}}
+        except Exception as exc:  # noqa: BLE001 — surfaced to the client as an error event
+            logger.exception("pipeline_unexpected_error", error=str(exc))
+            payload = {"type": "error", "detail": {"error_code": "INTERNAL_ERROR", "message": str(exc)}}
+        loop.call_soon_threadsafe(queue.put_nowait, payload)
+        loop.call_soon_threadsafe(queue.put_nowait, {"type": "__sentinel__"})
+
+    fut = loop.run_in_executor(None, worker)
+    try:
+        while True:
+            item = await queue.get()
+            kind = item["type"]
+            if kind == "__sentinel__":
+                break
+            if kind == "progress":
+                data = json.dumps(
+                    {"stage": item["stage"], "pct": item["pct"], "message": item["message"]}
+                )
+                yield f"event: progress\ndata: {data}\n\n"
+            elif kind == "result":
+                yield f"event: result\ndata: {json.dumps(item['data'])}\n\n"
+            elif kind == "error":
+                yield f"event: error\ndata: {json.dumps(item['detail'])}\n\n"
+    finally:
+        await fut
+
+
+def _run_pipeline(
+    request: TranscribeRequest,
+    progress: Callable[[str, int, str], None] | None = None,
+) -> TranscribeResponse:
+    """Synchronous pipeline — runs in a thread pool executor.
+
+    ``progress`` is an optional callback invoked at the start of each stage
+    with ``(stage, pct, message)``. The SSE streaming path uses it to report
+    real per-stage progress; the blocking JSON path passes ``None``.
+    """
+    if progress is None:
+        def progress(_stage: str, _pct: int, _message: str) -> None:  # noqa: ARG001
+            return None
+
     log = logger.bind(audio_path=request.audio_path, instrument=request.instrument_hint)
     timings: dict[str, float] = {}
 
@@ -158,6 +238,7 @@ def _run_pipeline(request: TranscribeRequest) -> TranscribeResponse:
     # ------------------------------------------------------------------
     # Stage 1 — Basic Pitch: raw audio → MIDI note events
     # ------------------------------------------------------------------
+    progress("transcribe", 15, "Transcribing audio with Basic Pitch")
     log.info("stage_start", stage="transcribe")
     midi_data, confidence_map, t1 = transcribe_stage.run(
         request.audio_path,
@@ -175,6 +256,7 @@ def _run_pipeline(request: TranscribeRequest) -> TranscribeResponse:
     # ------------------------------------------------------------------
     # Stage 2 — librosa: snap notes to the beat grid
     # ------------------------------------------------------------------
+    progress("quantize", 35, "Detecting tempo and quantizing rhythm")
     log.info("stage_start", stage="quantize")
     quantized_midi, tempo_bpm, time_sig, t2 = quantize_stage.run(
         midi_data,
@@ -193,6 +275,7 @@ def _run_pipeline(request: TranscribeRequest) -> TranscribeResponse:
     # ------------------------------------------------------------------
     # Stage 3 — music21: quantized MIDI → MusicXML
     # ------------------------------------------------------------------
+    progress("notate", 55, "Generating notation with music21")
     log.info("stage_start", stage="notate")
     music_xml, key_sig, t3 = notate_stage.run(
         quantized_midi,
@@ -211,6 +294,7 @@ def _run_pipeline(request: TranscribeRequest) -> TranscribeResponse:
     # ------------------------------------------------------------------
     # Stage 4 — Verovio: MusicXML → SVG + PDF
     # ------------------------------------------------------------------
+    progress("render", 65, "Rendering score with Verovio")
     log.info("stage_start", stage="render")
     svg, pdf_b64, t4 = render_stage.run(music_xml)
     timings["render_s"] = round(t4, 3)

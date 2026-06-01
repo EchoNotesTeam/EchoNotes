@@ -83,9 +83,13 @@ func (w *Worker) HandleTranscribe(ctx context.Context, t *asynq.Task) error {
 		log.Error().Err(err).Msg("failed to update sheet status to processing")
 	}
 
-	w.emitProgress(payload.JobID, payload.SheetID, "transcribing", 15, "Sending audio to ML service")
-
-	result, err := w.mlClient.Transcribe(payload.AudioPath, payload.Instrument)
+	// The ML service streams a progress event per pipeline stage over SSE;
+	// forward each one straight through to the job's subscribers.
+	result, err := w.mlClient.Transcribe(payload.AudioPath, payload.Instrument,
+		func(stage string, pct int, message string) {
+			w.emitProgress(payload.JobID, payload.SheetID, stage, pct, message)
+		},
+	)
 	if err != nil {
 		log.Error().Err(err).Msg("ML transcription failed")
 		_ = queries.UpdateJobFailed(ctx, payload.JobID, "ML_ERROR", err.Error())

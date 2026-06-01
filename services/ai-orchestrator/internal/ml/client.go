@@ -1,12 +1,14 @@
 package ml
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -50,7 +52,13 @@ type ErrorResponse struct {
 	Message   string `json:"message"`
 }
 
-func (c *Client) Transcribe(audioPath, instrument string) (*TranscribeResponse, error) {
+// Transcribe sends the audio to the ML service and consumes its SSE response.
+// Each `event: progress` is forwarded to onProgress (which may be nil); the
+// payload carried by the terminal `event: result` is returned.
+func (c *Client) Transcribe(
+	audioPath, instrument string,
+	onProgress func(stage string, pct int, message string),
+) (*TranscribeResponse, error) {
 	reqBody := TranscribeRequest{
 		AudioPath:      audioPath,
 		InstrumentHint: instrument,
@@ -66,6 +74,7 @@ func (c *Client) Transcribe(audioPath, instrument string) (*TranscribeResponse, 
 		return nil, fmt.Errorf("create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -73,25 +82,81 @@ func (c *Client) Transcribe(audioPath, instrument string) (*TranscribeResponse, 
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-
+	// A non-200 status means the ML service rejected the request before any
+	// streaming began (e.g. FastAPI request-validation 422). The body is a
+	// plain JSON error in that case, not an SSE stream.
 	if resp.StatusCode != http.StatusOK {
+		respBody, _ := io.ReadAll(resp.Body)
 		var errResp ErrorResponse
-		if jsonErr := json.Unmarshal(respBody, &errResp); jsonErr == nil && errResp.ErrorCode != "" {
+		if json.Unmarshal(respBody, &errResp) == nil && errResp.ErrorCode != "" {
 			return nil, fmt.Errorf("ml error [%s]: %s", errResp.ErrorCode, errResp.Message)
 		}
 		return nil, fmt.Errorf("ml service returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
-	var result TranscribeResponse
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return nil, fmt.Errorf("unmarshal response: %w", err)
+	return parseTranscribeStream(resp.Body, onProgress)
+}
+
+// parseTranscribeStream reads the SSE stream from POST /transcribe. It uses a
+// bufio.Reader (not a Scanner) because the `result` data line carries the full
+// MusicXML + SVG + base64 artifacts and can far exceed the Scanner token limit.
+func parseTranscribeStream(
+	body io.Reader,
+	onProgress func(stage string, pct int, message string),
+) (*TranscribeResponse, error) {
+	reader := bufio.NewReader(body)
+	var currentEvent string
+	var result *TranscribeResponse
+	var streamErr *ErrorResponse
+
+	for {
+		line, readErr := reader.ReadString('\n')
+
+		if trimmed := strings.TrimRight(line, "\r\n"); trimmed != "" {
+			switch {
+			case strings.HasPrefix(trimmed, "event:"):
+				currentEvent = strings.TrimSpace(trimmed[len("event:"):])
+			case strings.HasPrefix(trimmed, "data:"):
+				data := strings.TrimSpace(trimmed[len("data:"):])
+				switch currentEvent {
+				case "progress":
+					var ev struct {
+						Stage   string `json:"stage"`
+						Pct     int    `json:"pct"`
+						Message string `json:"message"`
+					}
+					if json.Unmarshal([]byte(data), &ev) == nil && onProgress != nil {
+						onProgress(ev.Stage, ev.Pct, ev.Message)
+					}
+				case "result":
+					var r TranscribeResponse
+					if err := json.Unmarshal([]byte(data), &r); err != nil {
+						return nil, fmt.Errorf("unmarshal result event: %w", err)
+					}
+					result = &r
+				case "error":
+					var er ErrorResponse
+					_ = json.Unmarshal([]byte(data), &er)
+					streamErr = &er
+				}
+			}
+		}
+
+		if readErr != nil {
+			if readErr == io.EOF {
+				break
+			}
+			return nil, fmt.Errorf("read sse stream: %w", readErr)
+		}
 	}
 
-	return &result, nil
+	if streamErr != nil {
+		return nil, fmt.Errorf("ml error [%s]: %s", streamErr.ErrorCode, streamErr.Message)
+	}
+	if result == nil {
+		return nil, fmt.Errorf("ml stream ended without a result event")
+	}
+	return result, nil
 }
 
 func (c *Client) Healthz() error {

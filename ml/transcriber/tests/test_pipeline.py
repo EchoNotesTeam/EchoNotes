@@ -217,6 +217,22 @@ class TestHTTPEndpoints:
         # Standard MIDI file magic bytes: 0x4D 0x54 0x68 0x64 ("MThd")
         assert midi_bytes[:4] == b"MThd"
 
+    def test_transcribe_sse_streams_progress(self, test_client, piano_c_major_wav):
+        resp = test_client.post(
+            "/transcribe",
+            json={"audio_path": piano_c_major_wav, "instrument_hint": "piano"},
+            headers={"Accept": "text/event-stream"},
+        )
+        assert resp.status_code == 200
+        assert "text/event-stream" in resp.headers["content-type"]
+
+        body = resp.text
+        # Every pipeline stage reports progress, then a terminal result event.
+        assert "event: progress" in body
+        assert "event: result" in body
+        for stage in ("transcribe", "quantize", "notate", "render"):
+            assert f'"stage": "{stage}"' in body
+
     def test_transcribe_guitar_end_to_end(self, test_client, guitar_e_minor_wav):
         resp = test_client.post(
             "/transcribe",

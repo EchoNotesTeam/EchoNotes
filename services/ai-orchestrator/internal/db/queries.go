@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"fmt"
 )
 
 const createJobSQL = `
@@ -198,5 +197,3 @@ func (q *Queries) UpdateSheetStatus(ctx context.Context, sheetID, status string,
 	_, err := q.db.Exec(ctx, updateSheetStatusSQL, sheetID, status, transcriptionID)
 	return err
 }
-
-_ = fmt.Sprintf
