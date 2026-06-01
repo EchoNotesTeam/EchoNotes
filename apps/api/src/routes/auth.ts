@@ -5,8 +5,13 @@ import bcrypt from "bcryptjs";
 import { SignJWT, jwtVerify } from "jose";
 import { prisma } from "../db/client.js";
 
+// Never let the insecure fallback reach production: a missing JWT_SECRET there
+// would silently sign every session with a public, guessable key.
+if (!process.env.JWT_SECRET && process.env.NODE_ENV === "production") {
+  throw new Error("JWT_SECRET environment variable is required in production");
+}
 const JWT_SECRET = new TextEncoder().encode(
-  process.env.JWT_SECRET || "fallback-secret-at-least-32-chars-long"
+  process.env.JWT_SECRET || "dev-only-insecure-secret-change-me-32chars"
 );
 const COOKIE_NAME = "session";
 

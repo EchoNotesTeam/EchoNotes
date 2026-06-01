@@ -115,7 +115,7 @@ flowchart LR
 - Prisma ORM (with `multiSchema` preview feature for cross-schema models)
 - Zod for request/response validation (via `fastify-type-provider-zod`)
 - `@fastify/websocket` for WS support
-- `bcrypt` for password hashing
+- `bcryptjs` for password hashing (pure-JS bcrypt; avoids a native build in the Docker image)
 - `jose` for JWT signing/verification
 - `pino` for structured logging
 
@@ -539,7 +539,7 @@ Progress streaming from Python to Go is implemented as an SSE response on `/tran
 
 ### 8.1 End-user auth
 
-- **Method:** email + password. bcrypt for hashing (cost factor 12).
+- **Method:** email + password. bcryptjs for hashing (cost factor 12).
 - **Session:** stateless JWT (HS256) stored in `httpOnly`, `SameSite=Lax`, `Secure` cookie. Expiry 14 days, sliding refresh on activity.
 - **Signup:** email verification deferred to post-MVP. The thesis demo doesn't need it.
 - **Password reset:** deferred. Admin (you) can reset in DB if needed during defense.
@@ -827,7 +827,7 @@ A ~6-month plan, written as monthly milestones with concrete acceptance criteria
 
 - All times are UTC.
 - All file paths are POSIX. Windows is not supported for the dev environment.
-- All UUIDs are v7 (time-ordered) generated server-side.
+- All UUIDs are v4 (random), generated server-side — Postgres `gen_random_uuid()` for primary keys, `crypto.randomUUID()` / `uuid.New()` in application code.
 - All amounts use SI units (bytes, seconds), not human-readable strings, in the DB.
 - All public API responses use `snake_case` for keys; internal TS code uses `camelCase` (mapped at the API boundary).
 

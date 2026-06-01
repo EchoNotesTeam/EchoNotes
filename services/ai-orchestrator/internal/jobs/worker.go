@@ -153,18 +153,20 @@ func (w *Worker) HandleTranscribe(ctx context.Context, t *asynq.Task) error {
 	keySig := result.Key
 	timeSig := result.TimeSignature
 	tempo := result.TempoBPM
+	duration := result.DurationSeconds
 
 	transcription, err := queries.CreateTranscription(ctx, db.CreateTranscriptionParams{
-		ID:            transcriptionID,
-		JobID:         payload.JobID,
-		MusicxmlPath:  musicxmlPath,
-		SvgPath:       svgPath,
-		PdfPath:       pdfPath,
-		MidiPath:      midiPath,
-		KeySignature:  &keySig,
-		TimeSignature: &timeSig,
-		TempoBpm:      &tempo,
-		ModelVersion:  "basic-pitch-v1",
+		ID:              transcriptionID,
+		JobID:           payload.JobID,
+		MusicxmlPath:    musicxmlPath,
+		SvgPath:         svgPath,
+		PdfPath:         pdfPath,
+		MidiPath:        midiPath,
+		KeySignature:    &keySig,
+		TimeSignature:   &timeSig,
+		TempoBpm:        &tempo,
+		DurationSeconds: &duration,
+		ModelVersion:    "basic-pitch-v1",
 	})
 	if err != nil {
 		log.Error().Err(err).Msg("failed to create transcription record")

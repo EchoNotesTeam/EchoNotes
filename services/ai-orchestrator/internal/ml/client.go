@@ -36,15 +36,16 @@ type TranscribeRequest struct {
 // Binary artifacts (MIDI, PDF) are base64-encoded so they can be
 // transported safely in a JSON response body.
 type TranscribeResponse struct {
-	MidiB64       string         `json:"midi_b64"`
-	MusicXML      string         `json:"music_xml"`
-	SVG           string         `json:"svg"`
-	PdfB64        string         `json:"pdf_b64"`
-	Key           string         `json:"key"`
-	TimeSignature string         `json:"time_signature"`
-	TempoBPM      float64        `json:"tempo_bpm"`
-	ConfidenceMap map[string]any `json:"confidence_map"`
-	StageTimings  map[string]any `json:"stage_timings"`
+	MidiB64         string         `json:"midi_b64"`
+	MusicXML        string         `json:"music_xml"`
+	SVG             string         `json:"svg"`
+	PdfB64          string         `json:"pdf_b64"`
+	Key             string         `json:"key"`
+	TimeSignature   string         `json:"time_signature"`
+	TempoBPM        float64        `json:"tempo_bpm"`
+	DurationSeconds float64        `json:"duration_seconds"`
+	ConfidenceMap   map[string]any `json:"confidence_map"`
+	StageTimings    map[string]any `json:"stage_timings"`
 }
 
 type ErrorResponse struct {

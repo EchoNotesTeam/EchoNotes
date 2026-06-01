@@ -9,7 +9,7 @@ import { prisma } from "../db/client.js";
 import { verifyJwt } from "./auth.js";
 import { orchestrator } from "../services/orchestrator.js";
 
-const ARTIFACT_ROOT = process.env.ARTIFACT_ROOT || "C:/var/echonotes";
+const ARTIFACT_ROOT = process.env.ARTIFACT_ROOT || "/var/echonotes";
 
 // Allowed audio MIME types and extensions for upload validation.
 const ALLOWED_EXTENSIONS = new Set([".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"]);

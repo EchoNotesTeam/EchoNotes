@@ -304,6 +304,7 @@ def _run_pipeline(
     # Encode final MIDI as base64 for the JSON response
     # ------------------------------------------------------------------
     midi_b64 = _encode_midi(quantized_midi)
+    duration_seconds = _audio_duration(request.audio_path, quantized_midi)
 
     total = round(sum(timings.values()), 3)
     log.info("pipeline_complete", total_s=total, key=key_sig, tempo=round(tempo_bpm, 1))
@@ -316,6 +317,7 @@ def _run_pipeline(
         key=key_sig,
         time_signature=time_sig,
         tempo_bpm=round(tempo_bpm, 2),
+        duration_seconds=round(duration_seconds, 2),
         confidence_map=confidence_map,
         stage_timings=timings,
     )
@@ -334,3 +336,18 @@ def _encode_midi(midi_data) -> str:  # pretty_midi.PrettyMIDI
             os.unlink(path)
         except OSError:
             pass
+
+
+def _audio_duration(audio_path: str, midi_data) -> float:  # midi_data: pretty_midi.PrettyMIDI
+    """Best-effort audio duration in seconds.
+
+    Reads only the audio header via soundfile (fast, no full decode); falls back
+    to the quantized MIDI end time if the header can't be read (some compressed
+    formats), so the field is always populated.
+    """
+    try:
+        import soundfile as sf
+
+        return float(sf.info(audio_path).duration)
+    except Exception:
+        return float(midi_data.get_end_time())
