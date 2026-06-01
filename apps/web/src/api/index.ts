@@ -1,5 +1,20 @@
 // Typed API client — thin wrapper over fetch that maps every backend endpoint.
-// All types match the Fastify backend responses exactly (apps/api/src/routes/).
+// Domain types come from @echonotes/shared-types (single source of truth).
+
+// Re-export all shared types so callers can import from one place.
+export type {
+  User,
+  Sheet,
+  SheetStatus,
+  Instrument,
+  Visibility,
+  SheetOwner,
+  Pagination,
+  BlogPostMeta,
+  BlogPostFull,
+  ProfileUser,
+  WsJobEvent,
+} from '@echonotes/shared-types'
 
 export class ApiError extends Error {
   constructor(
@@ -10,56 +25,6 @@ export class ApiError extends Error {
     super(message)
     this.name = 'ApiError'
   }
-}
-
-// ─── Domain types ────────────────────────────────────────────────────────────
-
-export interface User {
-  id: string
-  email: string
-  username: string
-  displayName: string
-}
-
-export interface Sheet {
-  id: string
-  ownerId: string
-  title: string
-  instrument: 'guitar' | 'piano'
-  visibility: 'private' | 'public'
-  status: 'pending' | 'processing' | 'ready' | 'failed'
-  transcriptionId: string | null
-  audioPath: string
-  tags: string[]
-  createdAt: string
-  deletedAt: string | null
-  owner?: { username: string; displayName: string }
-}
-
-export interface Pagination {
-  page: number
-  limit: number
-  total: number
-  pages: number
-}
-
-export interface BlogPostMeta {
-  slug: string
-  title: string
-  date: string | null
-  excerpt: string | null
-  author: string | null
-}
-
-export interface BlogPostFull extends BlogPostMeta {
-  content: string
-}
-
-export interface ProfileUser {
-  id: string
-  username: string
-  displayName: string
-  createdAt: string
 }
 
 // ─── Core fetch wrapper ───────────────────────────────────────────────────────

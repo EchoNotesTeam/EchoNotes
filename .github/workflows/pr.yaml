@@ -1,0 +1,25 @@
+name: Pull Request checks
+
+on:
+  pull_request:
+    branches: [main, develop]
+  push:
+    branches: [main]
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Quality gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run all checks
+        uses: ./.github/actions/run-checks
+        with:
+          # Set to 'true' in scheduled nightly runs or release branches
+          run_ml_tests: 'false'

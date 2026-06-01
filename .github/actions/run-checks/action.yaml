@@ -1,0 +1,101 @@
+name: Run all checks
+description: >
+  Composite action that runs the full quality gate for EchoNotes:
+  install → build → lint → test (TS + Go + optionally Python).
+  Used by pull-request workflows and branch protection rules.
+
+inputs:
+  run_ml_tests:
+    description: 'Run the Python ML service test suite (slower, requires TF deps)'
+    required: false
+    default: 'false'
+
+runs:
+  using: composite
+  steps:
+    # ── Node / pnpm setup ────────────────────────────────────────────────────
+    - name: Setup Node.js 22
+      uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+
+    - name: Setup pnpm
+      uses: pnpm/action-setup@v4
+      with:
+        version: '9'
+        run_install: false
+
+    - name: Get pnpm store path
+      id: pnpm-cache
+      shell: bash
+      run: echo "store=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+    - name: Cache pnpm store
+      uses: actions/cache@v4
+      with:
+        path: ${{ steps.pnpm-cache.outputs.store }}
+        key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+        restore-keys: pnpm-${{ runner.os }}-
+
+    - name: Install Node dependencies
+      shell: bash
+      run: pnpm install --frozen-lockfile
+
+    # ── TypeScript build ─────────────────────────────────────────────────────
+    - name: Build TypeScript packages
+      shell: bash
+      run: pnpm -r build
+
+    # ── Lint ─────────────────────────────────────────────────────────────────
+    - name: Lint (ESLint across all TS packages)
+      shell: bash
+      run: pnpm -r lint
+
+    # ── TS tests ─────────────────────────────────────────────────────────────
+    - name: Test — apps/api (Vitest)
+      shell: bash
+      run: pnpm --filter @echonotes/api test
+
+    - name: Test — apps/web (Vitest + vue-test-utils)
+      shell: bash
+      run: pnpm --filter @echonotes/web test
+
+    # ── Go setup + tests ─────────────────────────────────────────────────────
+    - name: Setup Go 1.23
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.23'
+        cache-dependency-path: services/ai-orchestrator/go.sum
+
+    - name: Go vet
+      shell: bash
+      run: go -C services/ai-orchestrator vet ./...
+
+    - name: Go test (with race detector)
+      shell: bash
+      run: go -C services/ai-orchestrator test -race -count=1 ./...
+
+    # ── Python / ML tests (optional — guarded by input) ──────────────────────
+    - name: Setup Python 3.11
+      if: inputs.run_ml_tests == 'true'
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Cache pip packages
+      if: inputs.run_ml_tests == 'true'
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: pip-${{ runner.os }}-${{ hashFiles('ml/transcriber/pyproject.toml') }}
+        restore-keys: pip-${{ runner.os }}-
+
+    - name: Install ML dependencies
+      if: inputs.run_ml_tests == 'true'
+      shell: bash
+      run: pip install -e "ml/transcriber[dev]"
+
+    - name: Test — ml/transcriber (pytest)
+      if: inputs.run_ml_tests == 'true'
+      shell: bash
+      run: pytest ml/transcriber -v --tb=short

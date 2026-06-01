@@ -8,23 +8,9 @@ import { pipeline } from "node:stream/promises";
 import { prisma } from "../db/client.js";
 import { verifyJwt } from "./auth.js";
 import { orchestrator } from "../services/orchestrator.js";
+import { ALLOWED_EXTENSIONS, ALLOWED_MIMES } from "../utils/audioValidation.js";
 
 const ARTIFACT_ROOT = process.env.ARTIFACT_ROOT || "/var/echonotes";
-
-// Allowed audio MIME types and extensions for upload validation.
-const ALLOWED_EXTENSIONS = new Set([".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac"]);
-const ALLOWED_MIMES = new Set([
-  "audio/mpeg",
-  "audio/wav",
-  "audio/x-wav",
-  "audio/flac",
-  "audio/ogg",
-  "audio/mp4",
-  "audio/x-m4a",
-  "audio/aac",
-  "audio/vnd.wave",
-  "application/octet-stream", // generic binary, allowed because some OS send this for audio
-]);
 
 export async function requireAuth(req: FastifyRequest, reply: FastifyReply) {
   const token = req.cookies.session;

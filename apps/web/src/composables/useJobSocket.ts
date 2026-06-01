@@ -1,11 +1,9 @@
 import { watch, onUnmounted, unref } from 'vue'
 import type { Ref } from 'vue'
+import type { WsJobEvent } from '@echonotes/shared-types'
 
-// ─── Event types (must match ws.ts server → client messages) ─────────────────
-export type WsJobEvent =
-  | { type: 'job_progress'; job_id: string; stage: string; pct: number; message?: string }
-  | { type: 'job_done'; job_id: string; sheet_id: string }
-  | { type: 'job_failed'; job_id: string; error_code: string; message: string }
+// Re-export so consumers can import from one place.
+export type { WsJobEvent }
 
 type EventHandler = (event: WsJobEvent) => void
 
@@ -127,4 +125,21 @@ export function useJobSocket(
     const id = unref(jobId)
     if (id) unsubscribe(id, onEvent)
   })
+}
+
+/**
+ * Resets all module-level singleton state.
+ * Only for use in unit tests — do not call in production code.
+ */
+export function _resetForTesting() {
+  if (socket) {
+    try { socket.close() } catch { /* ignore */ }
+    socket = null
+  }
+  if (reconnectTimer !== null) {
+    clearTimeout(reconnectTimer)
+    reconnectTimer = null
+  }
+  isConnecting = false
+  subscribers.clear()
 }

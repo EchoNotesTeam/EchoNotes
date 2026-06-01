@@ -68,7 +68,11 @@ useJobSocket(jobId, (event: WsJobEvent) => {
   } else if (event.type === 'job_done') {
     jobDone.value = true
     progress.value = { stage: 'done', pct: 100, message: '¡Transcripción completada!' }
-    setTimeout(() => void router.push(`/sheets/${event.sheet_id}`), 1500)
+    // Pass jobId in route state so SheetDetailView can subscribe to WS progress
+    setTimeout(() => void router.push({
+      path: `/sheets/${event.sheet_id}`,
+      state: { jobId: event.job_id },
+    }), 1500)
   } else if (event.type === 'job_failed') {
     jobFailed.value = true
     jobError.value = event.message || 'Error desconocido en la transcripción'

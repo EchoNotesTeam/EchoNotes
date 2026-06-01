@@ -11,6 +11,8 @@ import {
   downloadUrl,
   ApiError,
 } from '@/api/index.js'
+import { useJobSocket } from '@/composables/useJobSocket.js'
+import type { WsJobEvent } from '@echonotes/shared-types'
 import StatusBadge from '@/components/StatusBadge.vue'
 import BaseSpinner from '@/components/BaseSpinner.vue'
 
@@ -31,14 +33,45 @@ const { data, isLoading, isError } = useQuery({
     return apiGetPublicSheet(sheetId.value)
   },
   retry: false,
-  // Poll every 4s while the sheet is still being processed so the UI
-  // transitions to "ready" automatically without a manual refresh.
+  // Polling is the fallback for when WebSocket is unavailable (§14 risk table).
+  // It stops automatically once the sheet reaches a terminal status.
   refetchInterval: (query) => {
     const status = query.state.data?.sheet.status
     if (status === 'pending' || status === 'processing') return 4000
     return false
   },
 })
+
+// ─── Live progress via WebSocket (B7) ────────────────────────────────────────
+// Look up the active job for this sheet so we can subscribe to its progress.
+// We only have the sheetId here; the job_id is embedded in the WS events from
+// UploadView. When this page is opened directly (e.g. browser refresh during
+// processing), we rely on the polling fallback above.
+//
+// Strategy: listen for job_done/job_failed events on *any* job that mentions
+// this sheet. The WsRegistry on the server scopes messages per job_id, so we
+// hook into the global socket and filter by sheet_id.
+const liveJobId = ref<string | null>(null)
+
+function handleWsEvent(event: WsJobEvent) {
+  if (event.type === 'job_done' && event.sheet_id === sheetId.value) {
+    // Invalidate the sheet query so it re-fetches with the final SVG
+    void queryClient.invalidateQueries({ queryKey: ['sheet', sheetId] })
+    liveJobId.value = null
+  } else if (event.type === 'job_failed') {
+    void queryClient.invalidateQueries({ queryKey: ['sheet', sheetId] })
+    liveJobId.value = null
+  }
+}
+
+// Subscribe if the sheet is currently processing and a jobId was passed in
+// the route state (set by UploadView on redirect after job submission).
+const routeJobId = (route.state as Record<string, string> | undefined)?.['jobId'] ?? null
+if (routeJobId && data.value?.sheet.status === 'processing') {
+  liveJobId.value = routeJobId
+}
+
+useJobSocket(liveJobId, handleWsEvent)
 
 const sheet = computed(() => data.value?.sheet)
 const svg = computed(() => data.value?.svg)
