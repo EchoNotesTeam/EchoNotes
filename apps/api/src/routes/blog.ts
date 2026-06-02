@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import type { BlogPostMeta, BlogPostFull } from "@echonotes/shared-types";
 import fs from "node:fs";
 import path from "node:path";
+import { parseFrontmatter } from "../utils/frontmatter.js";
 
 import { parseFrontmatter } from "../utils/frontmatter.js";
 

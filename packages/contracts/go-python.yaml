@@ -1,0 +1,311 @@
+openapi: "3.1.0"
+
+info:
+  title: EchoNotes — Go Orchestrator → Python ML Service API
+  description: |
+    Internal REST contract between the Go AI Orchestrator
+    (`services/ai-orchestrator`) and the Python ML Service
+    (`ml/transcriber`).
+
+    **Security:** no authentication. The Python service listens only on the
+    Docker-internal network and is not reachable from outside the compose stack.
+
+    **Statefulness:** the Python service is entirely stateless. All state
+    (job records, artifact paths) is managed by the Go orchestrator.
+    Models are loaded once at startup and reused across requests.
+
+    Design plan ref: §7.4, §3.4
+  version: "1.0.0"
+
+servers:
+  - url: "http://ml:8000"
+    description: Docker Compose internal (production)
+  - url: "http://localhost:8001"
+    description: Local development (host port 8001 maps to container 8000)
+
+components:
+  schemas:
+    # ── Request ────────────────────────────────────────────────────────────
+    TranscribeRequest:
+      type: object
+      required: [audio_path]
+      properties:
+        audio_path:
+          type: string
+          description: |
+            Absolute path to the audio file on the shared Docker volume.
+            The file must already exist when this endpoint is called.
+          example: "/var/echonotes/uploads/a1b2c3d4-uuid.wav"
+        instrument_hint:
+          type: string
+          enum: [guitar, piano]
+          default: piano
+          description: |
+            Instrument type. Adjusts Basic Pitch onset thresholds
+            (guitar: lower threshold for attack transients).
+        options:
+          $ref: "#/components/schemas/TranscribeOptions"
+
+    TranscribeOptions:
+      type: object
+      description: Fine-grained tuning parameters for the transcription pipeline.
+      properties:
+        onset_threshold:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+          default: 0.5
+          description: |
+            Basic Pitch onset confidence threshold. Higher = fewer but more
+            precise note onsets. Guitar recordings benefit from a lower value.
+        note_threshold:
+          type: number
+          format: float
+          minimum: 0.0
+          maximum: 1.0
+          default: 0.3
+          description: Basic Pitch frame (note presence) confidence threshold.
+        minimum_note_length:
+          type: number
+          format: float
+          minimum: 0.0
+          default: 0.058
+          description: Minimum note duration in seconds (approx 58 ms).
+
+    # ── Response ───────────────────────────────────────────────────────────
+    TranscribeResponse:
+      type: object
+      required:
+        - midi_b64
+        - music_xml
+        - svg
+        - pdf_b64
+        - key
+        - time_signature
+        - tempo_bpm
+        - confidence_map
+        - stage_timings
+      properties:
+        midi_b64:
+          type: string
+          format: byte
+          description: |
+            Base64-encoded Standard MIDI File (SMF). Decoded by the Go
+            orchestrator via `DecodeMIDI()` and written to
+            `{ARTIFACT_ROOT}/artifacts/{transcription_id}/notes.midi`.
+        music_xml:
+          type: string
+          description: |
+            MusicXML document (UTF-8 string). Written to
+            `{ARTIFACT_ROOT}/artifacts/{transcription_id}/score.musicxml`.
+        svg:
+          type: string
+          description: |
+            SVG score rendered by Verovio with `adjustPageHeight=1`
+            (single tall page for in-browser scroll display). Written to
+            `{ARTIFACT_ROOT}/artifacts/{transcription_id}/score.svg`.
+        pdf_b64:
+          type: string
+          format: byte
+          description: |
+            Base64-encoded PDF. Empty string (`""`) if PDF generation failed
+            — the pipeline still succeeds in that case; only the PDF download
+            button is affected. Written to
+            `{ARTIFACT_ROOT}/artifacts/{transcription_id}/score.pdf`.
+        key:
+          type: string
+          description: |
+            Detected key signature string from music21 Krumhansl-Schmuckler
+            analysis.
+          example: "C major"
+        time_signature:
+          type: string
+          description: Detected time signature (heuristic 3/4 vs 4/4).
+          example: "4/4"
+        tempo_bpm:
+          type: number
+          format: float
+          description: Tempo in beats per minute from librosa `beat_track`.
+          example: 120.0
+        confidence_map:
+          type: object
+          description: Per-stage confidence statistics from the Basic Pitch output.
+          properties:
+            note_count:
+              type: integer
+              description: Number of notes detected.
+            mean_amplitude:
+              type: number
+              description: Mean velocity/amplitude of detected notes.
+            pitch_range_midi:
+              type: array
+              items: { type: integer }
+              minItems: 2
+              maxItems: 2
+              description: "[min_pitch, max_pitch] in MIDI note numbers."
+            mean_frame_confidence:
+              type: number
+              description: |
+                Mean activation of the Basic Pitch frame model output.
+                Absent if the model produced no frame activations.
+          additionalProperties: true
+        stage_timings:
+          type: object
+          description: Wall-clock time (seconds) spent in each pipeline stage.
+          properties:
+            transcribe_s: { type: number }
+            quantize_s:   { type: number }
+            notate_s:     { type: number }
+            render_s:     { type: number }
+          additionalProperties: true
+
+    # ── Error ──────────────────────────────────────────────────────────────
+    ErrorDetail:
+      type: object
+      description: |
+        FastAPI wraps all HTTPException details inside a `detail` key.
+        Go's `errorResponse` struct unwraps this envelope automatically.
+      required: [detail]
+      properties:
+        detail:
+          type: object
+          required: [error_code, message]
+          properties:
+            error_code:
+              type: string
+              example: "FILE_NOT_FOUND"
+            message:
+              type: string
+              example: "Audio file not found: /var/echonotes/uploads/missing.wav"
+
+    # ── Health ─────────────────────────────────────────────────────────────
+    HealthResponse:
+      type: object
+      required: [ok, models_loaded]
+      properties:
+        ok:
+          type: boolean
+          description: False when models are not loaded; returns HTTP 503 in that case.
+        models_loaded:
+          type: array
+          items: { type: string }
+          description: List of model names currently in memory.
+          example: ["basic_pitch"]
+
+    VersionResponse:
+      type: object
+      required: [basic_pitch, music21, verovio, service]
+      properties:
+        basic_pitch:
+          type: string
+          example: "0.3.5"
+        music21:
+          type: string
+          example: "9.3.0"
+        verovio:
+          type: string
+          example: "3.15.0"
+        service:
+          type: string
+          example: "0.1.0"
+
+paths:
+  /healthz:
+    get:
+      operationId: mlHealthz
+      summary: Liveness + readiness check
+      description: |
+        Returns 200 only when the Basic Pitch TensorFlow model is fully loaded
+        into memory. Returns 503 during startup while the model is loading.
+
+        Used by the docker-compose `healthcheck` with `start_period: 30s`
+        to give the service time to download and warm up the model on first boot.
+      responses:
+        "200":
+          description: Service healthy and models ready
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
+              example:
+                ok: true
+                models_loaded: ["basic_pitch"]
+        "503":
+          description: Models not loaded yet — retry after start_period
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail: { type: string, example: "Models not loaded yet" }
+
+  /version:
+    get:
+      operationId: mlVersion
+      summary: Library version report
+      description: Returns the installed versions of all ML libraries.
+      responses:
+        "200":
+          description: Version info
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/VersionResponse" }
+
+  /transcribe:
+    post:
+      operationId: transcribe
+      summary: Run the full four-stage transcription pipeline
+      description: |
+        Accepts a path to an audio file on the shared Docker volume and runs:
+
+        1. **Basic Pitch** (TensorFlow) — raw audio → polyphonic MIDI note events
+        2. **librosa** — beat-grid quantization (snaps notes to 16th-note grid)
+        3. **music21** — MIDI → MusicXML with key/time signature detection
+        4. **Verovio** — MusicXML → SVG + PDF rendering
+
+        All four stages run synchronously in a single thread-pool executor.
+        The endpoint blocks until all stages complete or an error occurs.
+
+        **TF model is not fork-safe** — only one Uvicorn worker is used.
+
+        **Expected latency:** ~0.5× realtime on CPU. A 3-minute audio file
+        takes approximately 6 minutes to process.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TranscribeRequest" }
+            example:
+              audio_path: "/var/echonotes/uploads/uuid.wav"
+              instrument_hint: "piano"
+      responses:
+        "200":
+          description: Transcription successful
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TranscribeResponse" }
+        "422":
+          description: |
+            Processing error (audio too short, no notes detected, bad format).
+            FastAPI wraps the error inside a `detail` envelope.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorDetail" }
+              examples:
+                no_notes:
+                  summary: No notes detected
+                  value:
+                    detail:
+                      error_code: PROCESSING_ERROR
+                      message: "No notes detected. Please upload a clear solo recording."
+                file_not_found:
+                  summary: Audio file missing
+                  value:
+                    detail:
+                      error_code: FILE_NOT_FOUND
+                      message: "Audio file not found: /var/echonotes/uploads/missing.wav"
+        "500":
+          description: Unexpected internal error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorDetail" }

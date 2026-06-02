@@ -10,6 +10,9 @@ RUN pnpm install --frozen-lockfile --filter @echonotes/api...
 
 # Copy source and generate Prisma client.
 COPY apps/api/ ./apps/api/
+# Blog posts are read at runtime from content/blog/ — bake them into the image.
+# The blog route resolves this path as: process.cwd()/../../content/blog
+COPY content/ ./content/
 RUN pnpm --filter @echonotes/api db:generate
 
 WORKDIR /app/apps/api

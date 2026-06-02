@@ -78,14 +78,15 @@ export async function wsRoutes(fastify: FastifyInstance) {
       return;
     }
 
-    connection.on("message", (messageStr: string) => {
+    // ws sends data as Buffer | ArrayBuffer | Buffer[] — call toString() before JSON.parse.
+    connection.on("message", (data: Buffer | ArrayBuffer | Buffer[]) => {
       try {
-        const msg = JSON.parse(messageStr);
-        if (msg.type === "subscribe_job") {
-          wsRegistry.subscribe(msg.job_id, connection);
-        } else if (msg.type === "unsubscribe_job") {
-          wsRegistry.unsubscribe(msg.job_id, connection);
-        } else if (msg.type === "ping") {
+        const msg = JSON.parse(data.toString()) as Record<string, unknown>;
+        if (msg["type"] === "subscribe_job") {
+          wsRegistry.subscribe(msg["job_id"] as string, connection);
+        } else if (msg["type"] === "unsubscribe_job") {
+          wsRegistry.unsubscribe(msg["job_id"] as string, connection);
+        } else if (msg["type"] === "ping") {
           connection.send(JSON.stringify({ type: "pong" }));
         }
       } catch {}

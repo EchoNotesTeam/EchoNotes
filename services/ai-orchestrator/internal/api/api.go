@@ -73,14 +73,22 @@ func NewServer(
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
-	r.Use(InternalTokenMiddleware(internalToken))
 
+	// /healthz is intentionally public — the docker-compose healthcheck calls
+	// this endpoint without any authentication header. Gating it with the
+	// internal token would cause the AI service to never become "healthy",
+	// preventing the TypeScript API from starting (depends_on: ai healthy).
 	r.Get("/healthz", s.handleHealthz)
-	r.Post("/jobs", s.handleCreateJob)
-	r.Get("/jobs/{id}", s.handleGetJob)
-	r.Get("/jobs/{id}/stream", s.handleStreamJob)
-	r.Delete("/jobs/{id}", s.handleDeleteJob)
-	r.Get("/transcriptions/{id}", s.handleGetTranscription)
+
+	// All other endpoints are internal-only and require the shared service token.
+	r.Group(func(pr chi.Router) {
+		pr.Use(InternalTokenMiddleware(internalToken))
+		pr.Post("/jobs", s.handleCreateJob)
+		pr.Get("/jobs/{id}", s.handleGetJob)
+		pr.Get("/jobs/{id}/stream", s.handleStreamJob)
+		pr.Delete("/jobs/{id}", s.handleDeleteJob)
+		pr.Get("/transcriptions/{id}", s.handleGetTranscription)
+	})
 
 	s.router = r
 	return s

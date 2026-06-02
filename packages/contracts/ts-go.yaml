@@ -1,0 +1,348 @@
+openapi: "3.1.0"
+
+info:
+  title: EchoNotes — TypeScript → Go Orchestrator API
+  description: |
+    Internal REST contract between the Fastify TypeScript backend (`apps/api`)
+    and the Go AI Orchestrator (`services/ai-orchestrator`).
+
+    **Security:** all endpoints except `/healthz` require the `X-Internal-Token`
+    header containing the shared 32-byte secret set in `INTERNAL_TOKEN`.
+    The Go middleware performs constant-time comparison to prevent timing attacks.
+
+    **Network:** the Go service is NOT exposed to the public internet.
+    It listens only on the Docker-internal network (`http://ai:8080`).
+
+    Design plan ref: §7.3
+  version: "1.0.0"
+  contact:
+    name: EchoNotes thesis project
+
+servers:
+  - url: "http://ai:8080"
+    description: Docker Compose internal (production)
+  - url: "http://localhost:8080"
+    description: Local development
+
+security:
+  - InternalToken: []
+
+components:
+  securitySchemes:
+    InternalToken:
+      type: apiKey
+      in: header
+      name: X-Internal-Token
+      description: |
+        Shared 32-byte secret. Set via `INTERNAL_TOKEN` env var on both services.
+        Generate with: `openssl rand -hex 32`
+
+  schemas:
+    # ── Request bodies ──────────────────────────────────────────────────────
+    CreateJobRequest:
+      type: object
+      required: [sheet_id, user_id, audio_path, instrument]
+      properties:
+        sheet_id:
+          type: string
+          format: uuid
+          description: ID of the `sheets.sheets` row (TypeScript-owned).
+        user_id:
+          type: string
+          format: uuid
+          description: ID of the authenticated user (soft ref to `auth.users.id`).
+        audio_path:
+          type: string
+          description: |
+            Absolute path on the shared Docker volume (`/var/echonotes/uploads/`).
+            The TypeScript API writes the file here before calling this endpoint.
+          example: "/var/echonotes/uploads/a1b2c3d4-uuid.wav"
+        instrument:
+          type: string
+          enum: [guitar, piano]
+          description: Instrument hint passed to the ML pipeline.
+
+    # ── Response bodies ─────────────────────────────────────────────────────
+    CreateJobResponse:
+      type: object
+      required: [job_id, status]
+      properties:
+        job_id:
+          type: string
+          format: uuid
+          description: ID of the newly created `jobs.transcription_jobs` row.
+        status:
+          type: string
+          enum: [queued]
+          description: Always `queued` on creation.
+
+    JobStatusResponse:
+      type: object
+      required: [id, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued, processing, done, failed]
+        stage:
+          type: string
+          description: Last known pipeline stage name (from `jobs.job_events`).
+          example: "transcribing"
+        pct:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Completion percentage of the last event.
+        error_code:
+          type: string
+          nullable: true
+          example: "ML_ERROR"
+        error_msg:
+          type: string
+          nullable: true
+        transcription_id:
+          type: string
+          format: uuid
+          nullable: true
+          description: Set only when `status=done`. Soft ref to `transcriptions.transcriptions.id`.
+
+    ProgressEvent:
+      type: object
+      description: |
+        Server-Sent Event payload. One JSON object per `data:` line.
+        The stream closes after a terminal event (`done=true` or `failed=true`).
+      required: [job_id, stage, pct]
+      properties:
+        job_id:
+          type: string
+          format: uuid
+        stage:
+          type: string
+          example: "saving"
+        pct:
+          type: integer
+          minimum: 0
+          maximum: 100
+        message:
+          type: string
+          description: Human-readable status message (optional).
+        done:
+          type: boolean
+          description: True on the final success event.
+        failed:
+          type: boolean
+          description: True on the final failure event.
+        sheet_id:
+          type: string
+          format: uuid
+          description: Present on the `done` event — enables the TS backend to route WS notifications.
+
+    HealthResponse:
+      type: object
+      required: [ok, services]
+      properties:
+        ok:
+          type: boolean
+        services:
+          type: object
+          properties:
+            db:
+              type: string
+              enum: [ok, unreachable]
+            ml:
+              type: string
+              enum: [ok, unreachable]
+
+    ErrorResponse:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              example: "VALIDATION_ERROR"
+            message:
+              type: string
+
+paths:
+  /healthz:
+    get:
+      operationId: getHealthz
+      summary: Liveness + readiness check
+      description: |
+        Returns 200 when the Go service, its Postgres connection, and the ML
+        service are all reachable. Used by the docker-compose healthcheck.
+        **This endpoint is unauthenticated** — no `X-Internal-Token` required.
+      security: []
+      responses:
+        "200":
+          description: Service healthy
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
+              example:
+                ok: true
+                services: { db: ok, ml: ok }
+        "503":
+          description: Postgres unreachable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthResponse" }
+              example:
+                ok: false
+                services: { db: unreachable, ml: ok }
+
+  /jobs:
+    post:
+      operationId: createJob
+      summary: Submit a new transcription job
+      description: |
+        Creates a `jobs.transcription_jobs` row with `status=queued`, enqueues
+        an asynq task in Redis, and returns immediately (202 Accepted).
+        The TypeScript backend stores the returned `job_id` and subscribes to
+        progress via `/jobs/{id}/stream`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateJobRequest" }
+      responses:
+        "202":
+          description: Job accepted and queued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreateJobResponse" }
+        "400":
+          description: Invalid request body or validation error
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "401":
+          description: Missing or invalid internal token
+        "500":
+          description: Database or queue error
+
+  /jobs/{id}:
+    get:
+      operationId: getJob
+      summary: Get job status and metadata
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Job found
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/JobStatusResponse" }
+        "401":
+          description: Missing or invalid internal token
+        "404":
+          description: Job not found
+
+    delete:
+      operationId: cancelJob
+      summary: Cancel a queued or processing job
+      description: |
+        Sets the job status to `failed` with `error_code=CANCELLED`.
+        If a worker is already processing the job, it checks DB status at the
+        next checkpoint and exits cleanly.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Job cancelled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+        "400":
+          description: Job already in a terminal state (done or failed)
+        "401":
+          description: Missing or invalid internal token
+        "404":
+          description: Job not found
+
+  /jobs/{id}/stream:
+    get:
+      operationId: streamJobProgress
+      summary: Subscribe to real-time job progress via SSE
+      description: |
+        Opens a Server-Sent Events stream. Each event is a `data:` line
+        containing a `ProgressEvent` JSON object.
+
+        - If the job is already in a terminal state, replays the final event and closes.
+        - Otherwise, replays any persisted events from `jobs.job_events` so a
+          late subscriber doesn't miss early stages, then streams live events.
+        - The `X-Accel-Buffering: no` header disables Nginx buffering.
+
+        The TypeScript backend subscribes here after creating the job and
+        fans out progress to the browser over WebSocket.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: SSE stream (text/event-stream)
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: |
+                  One `data: <json>` line per `ProgressEvent`.
+                  Final event has `done=true` or `failed=true`.
+        "401":
+          description: Missing or invalid internal token
+        "404":
+          description: Job not found
+
+  /transcriptions/{id}:
+    get:
+      operationId: getTranscription
+      summary: Fetch transcription artifact metadata
+      description: |
+        Returns the full `transcriptions.transcriptions` row so the TypeScript
+        backend can look up artifact file paths without direct DB access to
+        the Go-owned schema.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: Transcription found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  job_id: { type: string, format: uuid }
+                  musicxml_path: { type: string }
+                  svg_path: { type: string }
+                  pdf_path: { type: string }
+                  midi_path: { type: string }
+                  key_signature: { type: string, nullable: true }
+                  time_signature: { type: string, nullable: true }
+                  tempo_bpm: { type: number, nullable: true }
+                  model_version: { type: string }
+                  created_at: { type: string, format: date-time }
+        "401":
+          description: Missing or invalid internal token
+        "404":
+          description: Transcription not found
