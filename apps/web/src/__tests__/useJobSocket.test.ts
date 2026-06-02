@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { ref } from 'vue'
+import type { Ref } from 'vue'
 import { mount } from '@vue/test-utils'
 import { defineComponent } from 'vue'
 
@@ -46,6 +47,7 @@ let lastSocket: MockWebSocket | null = null
 vi.stubGlobal('WebSocket', class extends MockWebSocket {
   constructor(url: string) {
     super(url)
+    // Capture the freshly constructed mock so tests can drive it via receive().
     lastSocket = this
   }
 })
@@ -57,7 +59,7 @@ import type { WsJobEvent } from '@echonotes/shared-types'
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function useComposableInVue(
-  jobId: ReturnType<typeof ref<string | null>>,
+  jobId: Ref<string | null>,
   handler: (e: WsJobEvent) => void,
 ) {
   const comp = defineComponent({

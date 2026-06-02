@@ -62,6 +62,6 @@ const start = async () => {
   }
 };
 
-start();
+void start();
 export default fastify;
 export { fastify };

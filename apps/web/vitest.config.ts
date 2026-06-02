@@ -4,6 +4,12 @@ import vue from '@vitejs/plugin-vue'
 
 export default defineConfig({
   plugins: [vue()],
+  css: {
+    // Skip PostCSS/Tailwind entirely in unit tests — components assert on
+    // rendered classes/markup, not computed styles, so there's nothing to
+    // process and this keeps the suite fast.
+    postcss: { plugins: [] },
+  },
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),

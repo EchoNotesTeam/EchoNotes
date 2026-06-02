@@ -33,6 +33,7 @@ export default tseslint.config(
     },
     plugins: {
       vue: pluginVue,
+      '@typescript-eslint': tseslint.plugin,
     },
     rules: {
       // Essential Vue 3 rules
@@ -42,6 +43,16 @@ export default tseslint.config(
         'error',
         { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
       ],
+    },
+  },
+  // Test files: relax a couple of rules that are fine in mocks/fixtures.
+  {
+    files: ['src/**/*.test.ts'],
+    plugins: { '@typescript-eslint': tseslint.plugin },
+    rules: {
+      // Test mocks legitimately capture `this` (e.g. recording a constructed
+      // WebSocket instance so the test can drive it).
+      '@typescript-eslint/no-this-alias': 'off',
     },
   },
   {

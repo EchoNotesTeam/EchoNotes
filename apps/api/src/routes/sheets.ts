@@ -168,7 +168,7 @@ export async function sheetsRoutes(fastify: FastifyInstance) {
   );
 
   // GET /api/sheets/public — listing of all public sheets (no auth required).
-  server.get("/public", async (req: FastifyRequest, reply) => {
+  server.get("/public", async (req: FastifyRequest, _reply) => {
     const query = req.query as { page?: string; limit?: string };
     const page = Math.max(1, Number(query.page) || 1);
     const limit = Math.min(100, Math.max(1, Number(query.limit) || 20));

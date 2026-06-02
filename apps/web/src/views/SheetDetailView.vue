@@ -66,7 +66,9 @@ function handleWsEvent(event: WsJobEvent) {
 
 // Subscribe if the sheet is currently processing and a jobId was passed in
 // the route state (set by UploadView on redirect after job submission).
-const routeJobId = (route.state as Record<string, string> | undefined)?.['jobId'] ?? null
+// Navigation state set by UploadView lives on history.state, not on the route.
+const navState = window.history.state as Record<string, string> | null
+const routeJobId = navState?.['jobId'] ?? null
 if (routeJobId && data.value?.sheet.status === 'processing') {
   liveJobId.value = routeJobId
 }

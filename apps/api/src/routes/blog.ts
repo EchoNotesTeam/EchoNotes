@@ -1,24 +1,13 @@
 import type { FastifyInstance } from "fastify";
+import type { BlogPostMeta, BlogPostFull } from "@echonotes/shared-types";
 import fs from "node:fs";
 import path from "node:path";
 
-const BLOG_DIR = path.resolve(process.cwd(), "../../content/blog");
-
-interface PostMeta {
-  slug: string;
-  title: string;
-  date: string | null;
-  excerpt: string | null;
-  author: string | null;
-}
-
-interface PostFull extends PostMeta {
-  content: string;
-}
-
 import { parseFrontmatter } from "../utils/frontmatter.js";
 
-async function loadPost(file: string): Promise<PostFull> {
+const BLOG_DIR = path.resolve(process.cwd(), "../../content/blog");
+
+async function loadPost(file: string): Promise<BlogPostFull> {
   const slug = file.replace(/\.(mdx?|md)$/, "");
   const raw = await fs.promises.readFile(path.join(BLOG_DIR, file), "utf-8");
   const { meta, content } = parseFrontmatter(raw);
@@ -37,7 +26,7 @@ export async function blogRoutes(fastify: FastifyInstance) {
   // GET /api/blog — list all posts with metadata only (no body).
   fastify.get("/", async (_req, reply) => {
     if (!fs.existsSync(BLOG_DIR)) {
-      return { posts: [] as PostMeta[] };
+      return { posts: [] as BlogPostMeta[] };
     }
 
     try {
@@ -45,7 +34,7 @@ export async function blogRoutes(fastify: FastifyInstance) {
         (f) => f.endsWith(".mdx") || f.endsWith(".md")
       );
 
-      const posts: PostMeta[] = await Promise.all(
+      const posts: BlogPostMeta[] = await Promise.all(
         files.map(async (file) => {
           const post = await loadPost(file);
           const { content: _, ...meta } = post;

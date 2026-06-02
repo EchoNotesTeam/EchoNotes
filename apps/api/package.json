@@ -16,6 +16,7 @@
     "db:push": "prisma db push"
   },
   "dependencies": {
+    "@echonotes/shared-types": "workspace:*",
     "@fastify/cookie": "^11.0.2",
     "@fastify/cors": "^10.0.2",
     "@fastify/multipart": "^9.0.1",

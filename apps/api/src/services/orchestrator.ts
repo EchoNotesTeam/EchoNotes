@@ -60,7 +60,7 @@ export class OrchestratorService {
   ): AbortController {
     const controller = new AbortController();
 
-    (async () => {
+    void (async () => {
       try {
         const res = await fetch(`${AI_BASE_URL}/jobs/${jobId}/stream`, {
           headers: {

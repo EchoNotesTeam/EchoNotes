@@ -1,8 +1,8 @@
 // Typed API client — thin wrapper over fetch that maps every backend endpoint.
 // Domain types come from @echonotes/shared-types (single source of truth).
 
-// Re-export all shared types so callers can import from one place.
-export type {
+// Import the shared types so they're usable in this module's own signatures…
+import type {
   User,
   Sheet,
   SheetStatus,
@@ -15,6 +15,21 @@ export type {
   ProfileUser,
   WsJobEvent,
 } from '@echonotes/shared-types'
+
+// …and re-export them so callers can import from one place (`@/api`).
+export type {
+  User,
+  Sheet,
+  SheetStatus,
+  Instrument,
+  Visibility,
+  SheetOwner,
+  Pagination,
+  BlogPostMeta,
+  BlogPostFull,
+  ProfileUser,
+  WsJobEvent,
+}
 
 export class ApiError extends Error {
   constructor(

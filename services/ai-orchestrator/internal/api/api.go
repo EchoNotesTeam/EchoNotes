@@ -18,9 +18,17 @@ import (
 	"github.com/rs/zerolog"
 )
 
+// Database is the subset of *pgxpool.Pool the handlers and health check rely on.
+// Declaring it as an interface lets tests inject a fake db.DBTX without a live
+// Postgres connection; *pgxpool.Pool satisfies it in production.
+type Database interface {
+	db.DBTX
+	Ping(ctx context.Context) error
+}
+
 type Server struct {
 	router      chi.Router
-	pool        *pgxpool.Pool
+	pool        Database
 	asynqClient *asynq.Client
 	pubsub      *jobs.PubSub
 	mlClient    *ml.Client
