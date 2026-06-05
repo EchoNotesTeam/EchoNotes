@@ -7,8 +7,13 @@
     "node": ">=22"
   },
   "scripts": {
+    "setup": "node infra/scripts/setup-env.mjs && pnpm install",
     "dev:web": "pnpm --filter @echonotes/web dev",
     "dev:api": "pnpm --filter @echonotes/api dev",
+    "db:up": "docker compose -f infra/docker-compose.yml up -d postgres redis",
+    "services:up": "docker compose -f infra/docker-compose.yml up -d --build ml ai api",
+    "stop": "docker compose -f infra/docker-compose.yml stop",
+    "logs": "docker compose -f infra/docker-compose.yml logs -f",
     "build": "pnpm -r build",
     "lint": "pnpm -r lint",
     "test": "pnpm -r test"

@@ -22,50 +22,45 @@ See [`docs/EchoNotes_Design_Plan.md`](docs/EchoNotes_Design_Plan.md) for the ful
 - Go 1.23+
 - Python 3.11+ (the ML service builds in Docker on a pinned base image)
 - Docker & docker-compose
+- GNU make (included with Git for Windows, WSL, or `choco install make`)
 
 ## Setup
+
+Clone and run the one-time setup — it copies `infra/.env`, auto-generates the
+required secrets, and installs all dependencies:
 
 ```bash
 git clone https://github.com/<you>/echonotes
 cd echonotes
+make setup
+```
 
-# 1. Environment
-cp infra/.env.example infra/.env
-openssl rand -hex 32   # paste as INTERNAL_TOKEN in infra/.env
-openssl rand -hex 32   # paste as JWT_SECRET  in infra/.env
+Then apply the database migrations (starts postgres automatically if it isn't running):
 
-# 2. Dependencies (all TS workspaces)
-pnpm install
+```bash
+make migrate
+```
+
+Optionally seed a demo user and a couple of sheets:
+
+```bash
+make seed
 ```
 
 ## Run
 
-The backend services run in Docker; the Vue frontend runs natively for fast HMR.
-
 ```bash
-# Infra first
-docker compose -f infra/docker-compose.yml up -d postgres redis
-
-# Create the DB schemas — Prisma (auth, sheets) then goose (jobs, transcriptions).
-# Run from the host, so point DATABASE_URL at localhost (not the docker hostname).
-DATABASE_URL=postgres://echonotes:echonotes@localhost:5432/echonotes \
-  ./infra/scripts/migrate.sh
-
-# Optional: seed a demo user + a couple of sheets
-pnpm --filter @echonotes/api db:seed
-
-# Build and start the three app services (ml → ai → api, gated by healthchecks).
-# The first ml build is slow — it pulls the Basic Pitch / TensorFlow wheels.
-docker compose -f infra/docker-compose.yml up -d --build ml ai api
-
-# Frontend (hot reload) → http://localhost:5173
-pnpm dev:web
+make dev      # starts all backend services in Docker + the frontend at http://localhost:5173
+make stop     # stop when done (data is preserved)
 ```
+
+The first `make dev` after cloning is slow — Docker pulls the Basic Pitch / TensorFlow
+wheels for the ML service. Subsequent starts are fast.
 
 Verify everything is up:
 
 ```bash
-./infra/scripts/healthcheck.sh
+make health
 ```
 
 | Service | URL / port |
@@ -77,13 +72,16 @@ Verify everything is up:
 | PostgreSQL | localhost:5432 |
 | Redis | localhost:6379 |
 
-Common operations:
+Other useful commands:
 
 ```bash
-docker compose -f infra/docker-compose.yml logs -f ai    # tail a service
-docker compose -f infra/docker-compose.yml down          # stop (keeps volumes)
-./infra/scripts/reset-db.sh --force                      # wipe + re-migrate the DB
+make logs                          # tail logs from all containers
+make seed                          # load demo user + sheets
+make clean                         # stop + wipe all volumes (full reset)
+./infra/scripts/reset-db.sh --force   # wipe + re-migrate the DB only
 ```
+
+Run `make` with no arguments to see all available targets.
 
 ## Test
 
