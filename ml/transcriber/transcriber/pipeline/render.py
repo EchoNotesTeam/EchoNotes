@@ -83,6 +83,11 @@ def run(music_xml: str) -> tuple[str, str, float]:
     """
     t_start = time.perf_counter()
 
+    # Strip DOCTYPE, XML namespace declarations, and normalise the version to
+    # 3.1 before handing off to Verovio.  music21 9.x may emit xmlns:xlink
+    # attributes and/or a version="4.0" header that Verovio 3.15 rejects.
+    music_xml = _clean_musicxml(music_xml)
+
     # ------------------------------------------------------------------
     # Render to SVG (display)
     # ------------------------------------------------------------------
@@ -115,42 +120,17 @@ def run(music_xml: str) -> tuple[str, str, float]:
         if parse_error:
             raise ValueError(
                 "Verovio could not parse the MusicXML document. "
-                "This may indicate malformed XML or an empty score. "
                 f"XML parse error: {parse_error}"
             )
-
         if xml_part_count == 0 or xml_note_count == 0:
             raise ValueError(
                 "Verovio could not parse the MusicXML document. "
-                "The MusicXML payload appears to contain no parts or notes. "
-                "Verify that the preceding music21 stage produced a valid score."
+                "The score appears to contain no parts or notes."
             )
-
-        # Some MusicXML payloads are valid XML but fail Verovio due to the
-        # DOCTYPE or the specific MusicXML version header. Try a fallback with
-        # the DOCTYPE stripped and a 3.1 version header.
-        fallback_xml = re.sub(
-            r'<!DOCTYPE[^>]+>\s*',
-            '',
-            music_xml,
-            count=1,
+        raise ValueError(
+            "Verovio could not parse the MusicXML document. "
+            "This may indicate a malformed or empty score."
         )
-        fallback_xml = fallback_xml.replace(
-            'version="4.0"',
-            'version="3.1"',
-        )
-        fallback_xml = fallback_xml.replace(
-            'MusicXML 4.0',
-            'MusicXML 3.1',
-        )
-
-        if tk.loadData(fallback_xml):
-            music_xml = fallback_xml
-        else:
-            raise ValueError(
-                "Verovio could not parse the MusicXML document. "
-                "This may indicate a malformed or empty score."
-            )
 
     # With adjustPageHeight=1 there is always exactly one page.
     svg = tk.renderToSVG(1)
@@ -243,3 +223,21 @@ def _pdf_via_cairosvg(svg: str) -> str:
     except Exception as exc:
         logger.debug("pdf_cairosvg_failed", reason=str(exc))
         return ""
+
+
+def _clean_musicxml(xml: str) -> str:
+    """Normalise MusicXML for maximum Verovio compatibility.
+
+    music21 9.x may emit:
+    - A <!DOCTYPE> declaration that Verovio does not need and sometimes rejects.
+    - xmlns:xlink (and other namespace) declarations on <score-partwise> that
+      Verovio 3.15 does not understand.
+    - version="4.0" in the root element; Verovio has best support for 3.1.
+    """
+    # Remove DOCTYPE declaration (handles single-line and internal-subset forms)
+    xml = re.sub(r'<!DOCTYPE\b.*?(?:\]>|>)', '', xml, flags=re.DOTALL)
+    # Remove XML namespace declarations: xmlns="..." and xmlns:foo="..."
+    xml = re.sub(r'\s+xmlns(?::[a-zA-Z]\w*)?\s*=\s*"[^"]*"', '', xml)
+    # Normalise MusicXML version to 3.1 in the <score-partwise> root element
+    xml = re.sub(r'(<score-partwise\b[^>]*)version="[^"]*"', r'\1version="3.1"', xml)
+    return xml.strip()
