@@ -149,7 +149,11 @@ importers:
         specifier: ^2.2.0
         version: 2.2.12(typescript@5.9.3)
 
-  packages/shared-types: {}
+  packages/shared-types:
+    devDependencies:
+      typescript:
+        specifier: ^5.7.2
+        version: 5.9.3
 
 packages:
 

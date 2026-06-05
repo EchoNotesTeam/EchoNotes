@@ -54,15 +54,15 @@ logger = structlog.get_logger()
 @asynccontextmanager
 async def lifespan(app: FastAPI):  # noqa: ARG001
     """Load ML models on startup. Fail fast if a model cannot be loaded."""
-    logger.info("startup", event="loading_models")
+    logger.info("startup", phase="loading_models")
     try:
         transcribe_stage.load_model()
-        logger.info("startup", event="models_ready", models=transcribe_stage.models_loaded())
+        logger.info("startup", phase="models_ready", models=transcribe_stage.models_loaded())
     except Exception as exc:
-        logger.error("startup", event="model_load_failed", error=str(exc))
+        logger.error("startup", phase="model_load_failed", error=str(exc))
         raise
     yield
-    logger.info("shutdown", event="service_stopping")
+    logger.info("shutdown", phase="service_stopping")
 
 
 app = FastAPI(

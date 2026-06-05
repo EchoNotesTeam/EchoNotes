@@ -23,8 +23,10 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import tempfile
 import time
+import xml.etree.ElementTree as ET
 
 import structlog
 import verovio
@@ -88,10 +90,67 @@ def run(music_xml: str) -> tuple[str, str, float]:
     tk.setOptions(_DISPLAY_OPTIONS)
 
     if not tk.loadData(music_xml):
-        raise ValueError(
-            "Verovio could not parse the MusicXML document. "
-            "This may indicate a malformed or empty score."
+        parse_error = None
+        try:
+            xml_tree = ET.fromstring(music_xml)
+        except ET.ParseError as exc:
+            parse_error = str(exc)
+            xml_tree = None
+
+        xml_note_count = 0
+        xml_part_count = 0
+        if xml_tree is not None:
+            xml_part_count = len(xml_tree.findall('.//{*}part'))
+            xml_note_count = len(xml_tree.findall('.//{*}note'))
+
+        logger.debug(
+            "verovio_load_failed",
+            xml_bytes=len(music_xml),
+            xml_head=music_xml[:400],
+            parse_error=parse_error,
+            part_count=xml_part_count,
+            note_count=xml_note_count,
         )
+
+        if parse_error:
+            raise ValueError(
+                "Verovio could not parse the MusicXML document. "
+                "This may indicate malformed XML or an empty score. "
+                f"XML parse error: {parse_error}"
+            )
+
+        if xml_part_count == 0 or xml_note_count == 0:
+            raise ValueError(
+                "Verovio could not parse the MusicXML document. "
+                "The MusicXML payload appears to contain no parts or notes. "
+                "Verify that the preceding music21 stage produced a valid score."
+            )
+
+        # Some MusicXML payloads are valid XML but fail Verovio due to the
+        # DOCTYPE or the specific MusicXML version header. Try a fallback with
+        # the DOCTYPE stripped and a 3.1 version header.
+        fallback_xml = re.sub(
+            r'<!DOCTYPE[^>]+>\s*',
+            '',
+            music_xml,
+            count=1,
+        )
+        fallback_xml = fallback_xml.replace(
+            'version="4.0"',
+            'version="3.1"',
+        )
+        fallback_xml = fallback_xml.replace(
+            'MusicXML 4.0',
+            'MusicXML 3.1',
+        )
+
+        if tk.loadData(fallback_xml):
+            music_xml = fallback_xml
+        else:
+            raise ValueError(
+                "Verovio could not parse the MusicXML document. "
+                "This may indicate a malformed or empty score."
+            )
 
     # With adjustPageHeight=1 there is always exactly one page.
     svg = tk.renderToSVG(1)

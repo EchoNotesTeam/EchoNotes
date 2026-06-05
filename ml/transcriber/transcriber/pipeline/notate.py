@@ -12,9 +12,11 @@ from __future__ import annotations
 import os
 import tempfile
 import time
+import xml.etree.ElementTree as ET
 
 import pretty_midi
 import structlog
+from music21 import defaults
 
 logger = structlog.get_logger()
 
@@ -40,10 +42,12 @@ def run(
     # in contexts where music21 is unavailable.
     from music21 import (
         converter,
+        defaults,
         environment,
         instrument as m21instrument,
         tempo as m21tempo,
     )
+    from music21.musicxml.xmlObjects import MusicXMLExportException
 
     t_start = time.perf_counter()
 
@@ -51,7 +55,7 @@ def run(
     # We use Verovio for rendering — these external programs are not needed.
     us = environment.UserSettings()
     us["warnings"] = 0
-    us["autoDownload"] = "no"
+    us["autoDownload"] = "deny"
 
     # ----------------------------------------------------------------
     # Write the quantized MIDI to a temp file so music21 can parse it.
@@ -99,12 +103,45 @@ def run(
         # ----------------------------------------------------------------
         score.makeNotation(inPlace=True)
 
-        # ----------------------------------------------------------------
-        # Export to MusicXML (UTF-8).
-        # ----------------------------------------------------------------
-        score.write("musicxml", fp=xml_tmp.name)
+        # Use the already notated score directly to avoid a second
+        # automatic makeNotation pass during music21.write().
+        original_version = defaults.musicxmlVersion
+        try:
+            defaults.musicxmlVersion = "3.1"
+            try:
+                score.write("musicxml", fp=xml_tmp.name, makeNotation=False)
+            except MusicXMLExportException as exc:
+                logger.warning("musicxml_export_fallback", reason=str(exc))
+                try:
+                    fallback_score = score.splitAtDurations()[0]
+                    fallback_score.makeNotation(inPlace=True)
+                    fallback_score.write("musicxml", fp=xml_tmp.name, makeNotation=False)
+                except Exception as fallback_exc:
+                    logger.warning(
+                        "musicxml_export_final_fallback",
+                        reason=str(fallback_exc),
+                    )
+                    score.write("musicxml", fp=xml_tmp.name, makeNotation=True)
+        finally:
+            defaults.musicxmlVersion = original_version
+
         with open(xml_tmp.name, "r", encoding="utf-8") as f:
             music_xml = f.read()
+
+        if not music_xml.strip():
+            raise ValueError(
+                "music21 produced an empty MusicXML document. "
+                "This can happen when the quantized MIDI contains no notes or "
+                "when export failed before writing output."
+            )
+
+        try:
+            ET.fromstring(music_xml)
+        except ET.ParseError as exc:
+            raise ValueError(
+                "music21 produced invalid MusicXML. "
+                f"XML parse error: {exc}"
+            ) from exc
 
     except Exception:
         raise

@@ -16,7 +16,8 @@ FROM python:3.11-slim-bookworm AS base
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PIP_DEFAULT_TIMEOUT=120
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libsndfile1 \
@@ -36,7 +37,7 @@ WORKDIR /app
 COPY pyproject.toml ./
 
 # Install only the runtime dependencies (not dev/eval extras).
-RUN pip install --no-cache-dir ".[dev]" && \
+RUN pip install --no-cache-dir --default-timeout=120 --retries=10 ".[dev]" && \
     # Warm up the Basic Pitch model download at build time so the first
     # request does not need to download it at runtime.
     python -c "from basic_pitch import ICASSP_2022_MODEL_PATH; print('model path:', ICASSP_2022_MODEL_PATH)"
