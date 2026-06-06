@@ -2,11 +2,18 @@ import type { FastifyInstance } from "fastify";
 import { WsRegistry } from "../services/wsRegistry.js";
 import { orchestrator } from "../services/orchestrator.js";
 import { verifyJwt } from "./auth.js";
+import { pendingDemos, runDemoFor } from "../services/demoSimulator.js";
 
 const activeStreams = new Map<string, AbortController>();
 
 export const wsRegistry = new WsRegistry(
   (jobId) => {
+    // Demo mode: stream simulated progress without touching the Go orchestrator.
+    if (pendingDemos.has(jobId)) {
+      runDemoFor(jobId, (event) => wsRegistry.broadcast(jobId, event)).catch(() => {});
+      return;
+    }
+
     const controller = orchestrator.streamJobProgress(
       jobId,
       (event) => {

@@ -13,6 +13,8 @@ COPY apps/api/ ./apps/api/
 # Blog posts are read at runtime from content/blog/ — bake them into the image.
 # The blog route resolves this path as: process.cwd()/../../content/blog
 COPY content/ ./content/
+# Demo PDF for the simulated transcription mode (title "To Zanankard").
+COPY apps/web/src/stores/To_Zanankard.pdf ./apps/web/src/stores/To_Zanankard.pdf
 RUN pnpm --filter @echonotes/api db:generate
 
 WORKDIR /app/apps/api

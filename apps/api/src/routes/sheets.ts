@@ -9,6 +9,7 @@ import { prisma } from "../db/client.js";
 import { verifyJwt } from "./auth.js";
 import { orchestrator } from "../services/orchestrator.js";
 import { ALLOWED_EXTENSIONS, ALLOWED_MIMES } from "../utils/audioValidation.js";
+import { pendingDemos, runDemoFor } from "../services/demoSimulator.js";
 
 const ARTIFACT_ROOT = process.env.ARTIFACT_ROOT || "/var/echonotes";
 
@@ -150,6 +151,21 @@ export async function sheetsRoutes(fastify: FastifyInstance) {
           tags,
         },
       });
+
+      // Demo mode: if the title is "To Zanankard" (case-insensitive), skip the
+      // real AI pipeline and stream a simulated transcription instead.
+      if (title.trim().toLowerCase() === "to zanankard") {
+        const jobId = `DEMO_${crypto.randomUUID()}`;
+        pendingDemos.set(jobId, { sheetId: sheet.id });
+        // Fallback timer: run simulation even if the frontend never subscribes
+        // via WebSocket (e.g. the WS connection drops or the browser is slow).
+        setTimeout(() => {
+          if (pendingDemos.has(jobId)) {
+            runDemoFor(jobId, () => {}).catch(() => {});
+          }
+        }, 20_000);
+        return { sheetId: sheet.id, jobId };
+      }
 
       try {
         const jobRes = await orchestrator.submitJob(sheet.id, req.user!.id, audioPath, instrument);
